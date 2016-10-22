@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"net"
 	"strings"
+	"sort"
 	"github.com/arcaneiceman/GoVector/capture"
 	"github.com/arcaneiceman/GoVector/govec"
 )
@@ -29,6 +30,109 @@ import (
 type Slave struct {
     Address string
     Clock int
+    Delta int
+}
+
+type Slaves []Slave
+
+func (slice Slaves) Len() int {
+    return len(slice)
+}
+
+func (slice Slaves) Less(i, j int) bool {
+    return slice[i].Clock < slice[j].Clock;
+}
+
+func (slice Slaves) Swap(i, j int) {
+    slice[i], slice[j] = slice[j], slice[i]
+}
+
+func (s *Slave) run(logFile string) {
+
+	Logger := govec.Initialize("slave"+s.Address, logFile)
+	go startClock(&s.Clock)
+
+	// Listen to host:ip
+	// slaveAddr, err := net.ResolveUDPAddr("udp", s.Address)
+	// if err != nil {
+	// 	fmt.Println(err)
+	// 	os.Exit(1)
+	// }
+
+	// slaveConn, err := net.ListenUDP("udp", slaveAddr)
+	conn, err := net.ListenPacket("udp", s.Address)
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+
+	defer conn.Close()
+
+	// Create byte array with underlying array to hold up to 1024 bytes
+	b := make([]byte, 1024)
+	
+	lastKnownSyncRound := -1
+
+	for {
+		var msgReceived string
+		// Receive message from Master
+		// n, masterAddress, err := conn.ReadFromUDP(b[:])
+		n, masterAddress, err := capture.ReadFrom(conn.ReadFrom, b[0:])
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		Logger.UnpackReceive("Received message from master: ", b[0:n], &msgReceived)
+		// fmt.Println("Received ", string(b[:n]), "from master at ", masterAddress)
+
+		// msgReceived := string(b[:n])
+		splitMsg := strings.Split(msgReceived, " ")
+
+		if len(splitMsg) < 2 || len(splitMsg) > 4 {
+			fmt.Println("Malformed message from ", masterAddress)
+			continue
+		}
+
+		syncRound := splitMsg[0]
+		syncRoundInt, err := strconv.Atoi(syncRound)
+		if err != nil {
+			fmt.Println("Malformed message from master.")
+			continue
+		}
+
+		action := splitMsg[1]
+
+		if action == "request" {
+			lastKnownSyncRound = syncRoundInt
+			t1 := splitMsg[2]
+			t2 := s.Clock
+
+			// Send local clock back to Master
+			responseMsg := syncRound + " clock " + t1 + " " + strconv.Itoa(t2)
+			msgBuf := Logger.PrepareSend("Sending message to master: ", responseMsg)
+
+			// n, err = conn.WriteToUDP([]byte(msgBuf), masterAddress)
+			_, err = capture.WriteTo(conn.WriteTo, msgBuf, masterAddress)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+		} else if action == "update"  && syncRoundInt >= lastKnownSyncRound{
+			// Update local clock (sync)
+			clockAdjust, err := strconv.Atoi(splitMsg[2])
+			if err != nil {
+				fmt.Println("Could not parse new clock received from Master.")
+				continue
+			}
+			s.Clock = s.Clock + clockAdjust
+			fmt.Println("Updated clock to: ", s.Clock)
+		}
+		
+	}
+
+	fmt.Println("Hello world.")	
 }
 
 type Master struct {
@@ -43,12 +147,6 @@ type Master struct {
 	SyncRound int
 	Logger *govec.GoLog
 	// slaves []Slave
-}
-
-// var GoVecLogger *govec.GoLog
-
-func (s Slave) SetClock(newClock int) {
-	s.Clock = newClock
 }
 
 func main() {
@@ -96,7 +194,7 @@ func main() {
 		}
 
 		logFile := os.Args[4]
-		slave := Slave{ipPort, initialClock}
+		slave := Slave{ipPort, initialClock, -1}
 		slave.run(logFile)
 	} else {
 		panic("Flag should be -m or -s")
@@ -124,6 +222,7 @@ func (m *Master) run() {
 	// res := make([]int, len(slaves))
 	for {
 		for _, v := range m.Slaves {
+			v.Clock = -1
 			go m.sendClockRequest(v)
 		}
 
@@ -133,16 +232,24 @@ func (m *Master) run() {
 		// Update syncRound. Messages received from now on will be ignored until the next sendClockRequest
 		m.SyncRound++
 
-		// Calculate clock diff
-		clockAdjust := 10
+		// Calculate fault-tolerant average
+		validSlaves := make(Slaves, 0)
+		for _, v := range m.Slaves {
+			if v.Clock > -1 {
+				validSlaves = append(validSlaves, *v)
+			}
+		}
+		
+		avg := calculateAvg(validSlaves, m.Threshold)
+
 
 		// Send updated clock to each slave
 		for _, v := range m.Slaves {
-			go m.sendClockUpdate(v, m.SyncRound, clockAdjust)
+			go m.sendClockUpdate(v, m.SyncRound, avg-v.Delta)
 		}
 
 		for _, v := range m.Slaves {
-			fmt.Printf("Slave %v - clock: %v\n", v.Address, v.Clock)
+			fmt.Printf("Slave %v - clock: %v, delta %v\n", v.Address, v.Clock, v.Delta)
 		}
 		// From time to time, startSynchronization(syncRound=i, timeout=5seconds):
 		// Note: syncRound can be used to ignore replies from earlier sync rounds.
@@ -155,6 +262,39 @@ func (m *Master) run() {
 		//         sendTimeCorrection(timeCorrection))
 		//     Adjust local time
 	}
+}
+
+func calculateAvg(slavesAlive Slaves, d int) int {
+	fmt.Println("Valid slaves: ", slavesAlive)
+	sort.Sort(slavesAlive)
+	fmt.Println("Valid slaves sorted: ", slavesAlive)
+	sizeLargestSubset := 0
+	avg := 0
+
+	for i, v := range slavesAlive {
+		sizeOfSubset := 1
+		totalDelta := v.Delta
+		for j, v2 := range slavesAlive {
+			if i == j {
+				continue
+			}
+			diff := v.Delta - v2.Delta
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff <= d {
+				sizeOfSubset++
+				totalDelta += v2.Delta
+			}
+		}
+		if sizeOfSubset > sizeLargestSubset {
+			sizeLargestSubset = sizeOfSubset
+			avg = totalDelta/sizeOfSubset
+		}
+	}
+	fmt.Println("Size of subset: ", sizeLargestSubset)
+	fmt.Println("Avg delta: ", avg)
+	return avg
 }
 
 func (m *Master) establishConnection() {
@@ -178,7 +318,6 @@ func (m *Master) listenToSlaves() {
 	b := make([]byte, 1024)
 
 	for {
-
 		var messageReceived string
 		// n, slaveAddr, err := m.Conn.ReadFromUDP(b[0:])
 		n, slaveAddr, err := capture.ReadFrom(m.Conn.ReadFrom, b[0:])
@@ -189,16 +328,18 @@ func (m *Master) listenToSlaves() {
 
         
 		m.Logger.UnpackReceive("Received message from slave", b[0:n], &messageReceived)
-        
+        t3 := m.Clock
+
         slaveAddress := slaveAddr.String()
         fmt.Println(messageReceived, " from Slave at ", slaveAddress)
 		
 		splitMsg := strings.Split(messageReceived, " ")
 
-		if len(splitMsg) != 3 {
+		if len(splitMsg) != 4 {
 			fmt.Println("Malformed message from ", slaveAddress)
 			continue
 		}
+
 
 		syncRound, err := strconv.Atoi(splitMsg[0])
 		if err != nil {
@@ -212,16 +353,23 @@ func (m *Master) listenToSlaves() {
 		}
 
 		action := splitMsg[1]
-		slaveClock, err := strconv.Atoi(splitMsg[2])
-		if err != nil {
-			fmt.Println("Could not parse clock received from Slave.")
-			continue
-		}
 
 		if action == "clock" {
-			// Update slave's clock
-			fmt.Printf("Updating slave clock from %v to %v", m.Slaves[slaveAddress].Clock, slaveClock)
-			m.Slaves[slaveAddress].Clock = slaveClock
+			t1, err := strconv.Atoi(splitMsg[2])
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+			t2, err := strconv.Atoi(splitMsg[3])
+			if err != nil {
+				fmt.Println("Could not parse clock received from Slave.")
+				continue
+			}
+			
+			delta := (t1+t3)/2 - t2
+			m.Slaves[slaveAddress].Clock = t2
+			m.Slaves[slaveAddress].Delta = delta
 		}
 	}
 }
@@ -234,7 +382,7 @@ func (m *Master) sendClockRequest(s *Slave) {
 		return
 	}
 
-	msg := strconv.Itoa(m.SyncRound) + " request "
+	msg := strconv.Itoa(m.SyncRound) + " request " + strconv.Itoa(m.Clock)
 	// fmt.Println("Sending this msg: ", msg)
 
 	outBuf := m.Logger.PrepareSend("Sending message to slave: ", msg)
@@ -268,93 +416,6 @@ func (m *Master) sendClockUpdate(s *Slave, syncRound int, clockDiff int) {
 	}
 }
 
-func (s *Slave) run(logFile string) {
-
-	Logger := govec.Initialize("slave"+s.Address, logFile)
-	go startClock(&s.Clock)
-
-	// Listen to host:ip
-	// slaveAddr, err := net.ResolveUDPAddr("udp", s.Address)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	os.Exit(1)
-	// }
-
-	// slaveConn, err := net.ListenUDP("udp", slaveAddr)
-	conn, err := net.ListenPacket("udp", s.Address)
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-
-	defer conn.Close()
-
-	// Create byte array with underlying array to hold up to 1024 bytes
-	b := make([]byte, 1024)
-	
-	lastKnownSyncRound := -1
-
-	for {
-		var msgReceived string
-		// Receive message from Master
-		// n, masterAddress, err := conn.ReadFromUDP(b[:])
-		n, masterAddress, err := capture.ReadFrom(conn.ReadFrom, b[0:])
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-
-		Logger.UnpackReceive("Received message from master: ", b[0:n], &msgReceived)
-		// fmt.Println("Received ", string(b[:n]), "from master at ", masterAddress)
-
-		// msgReceived := string(b[:n])
-		splitMsg := strings.Split(msgReceived, " ")
-
-		if len(splitMsg) < 2 || len(splitMsg) > 3 {
-			fmt.Println("Malformed message from ", masterAddress)
-			continue
-		}
-
-		syncRound := splitMsg[0]
-		syncRoundInt, err := strconv.Atoi(syncRound)
-		if err != nil {
-			fmt.Println("Malformed message from master.")
-			continue
-		}
-
-		action := splitMsg[1]
-
-		if action == "request" {
-			lastKnownSyncRound = syncRoundInt
-
-			// Send local clock back to Master
-			responseMsg := syncRound + " clock " + strconv.Itoa(s.Clock)
-			msgBuf := Logger.PrepareSend("Sending message to master: ", responseMsg)
-
-			// n, err = conn.WriteToUDP([]byte(msgBuf), masterAddress)
-			_, err = capture.WriteTo(conn.WriteTo, msgBuf, masterAddress)
-			if err != nil {
-				fmt.Println(err)
-				continue
-			}
-
-		} else if action == "update"  && syncRoundInt >= lastKnownSyncRound{
-			// Update local clock (sync)
-			newClock, err := strconv.Atoi(splitMsg[2])
-			if err != nil {
-				fmt.Println("Could not parse new clock received from Master.")
-				continue
-			}
-			s.SetClock(newClock)
-			fmt.Println("Updated clock to: ", s.Clock)
-		}
-		
-	}
-	// Listen for time correction and update local clock
-	
-	fmt.Println("Hello world.")	
-}
-
 func startClock(clock *int) {
 	ticker := time.NewTicker(1 * time.Millisecond)
 	
@@ -368,6 +429,7 @@ func (m *Master) loadSlavesFromFile() {
 
 	// Read slavesfile to get list of slaves (host:ip) to connect with
 	f, err := os.Open(m.SlavesFile)
+	// checkError(err)
 	if err != nil {
 		panic(err)
 	}
@@ -376,10 +438,8 @@ func (m *Master) loadSlavesFromFile() {
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		slave_address := scanner.Text()
-		m.Slaves[slave_address] = &Slave{slave_address, -1}
-		// slaves = append(slaves, slave_address, -1})
+		m.Slaves[slave_address] = &Slave{slave_address, -1, -1}
 	}
-	// return slaves
 }
 
 func checkError(err error) {
