@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"math/rand"
 	"time"
+	"sync"
 	// "github.com/arcaneiceman/GoVector/capture"
 	// "github.com/arcaneiceman/GoVector/govec"
 )
@@ -33,9 +34,7 @@ var (
 	ourSequenceNumber int
 	highestSequenceNumber int
 	outstandingReplyCount int
-
 	requestingCS bool = false
-	replyDeferred []bool
 )
 
 type Node struct {
@@ -63,6 +62,7 @@ type JoinData struct {
 type AcceptData struct {
 	ActiveNodes []Node
 	AssignedNodeId int
+	HighestSequenceNumber int
 }
 
 
@@ -97,7 +97,7 @@ func parseArgs() {
 
 		shivizLogfile = os.Args[7]
 		dinvLogfile = os.Args[8]
-		fmt.Printf("\nSanity check: running in bootstrap mode with IP for listening (%v), RTT (%v), FlipeProb (%v), FlipInvokeCS (%v), CSSleepTime (%v), shiviz-logfile (%v), and dinv-logfile (%v)\n", ipForListening, RTT, FlipProb, FlipInvokeCS, CSSleepTime, shivizLogfile, dinvLogfile)
+		// fmt.Printf("\nSanity check: running in bootstrap mode with IP for listening (%v), RTT (%v), FlipeProb (%v), FlipInvokeCS (%v), CSSleepTime (%v), shiviz-logfile (%v), and dinv-logfile (%v)\n", ipForListening, RTT, FlipProb, FlipInvokeCS, CSSleepTime, shivizLogfile, dinvLogfile)
 	} else if ModeFlag == "-j" {
 		if len(os.Args) < 9 {
 			fmt.Printf("Args: %v\n", os.Args[1:])
@@ -121,12 +121,13 @@ func parseArgs() {
 
 		shivizLogfile = os.Args[8]
 		dinvLogfile = os.Args[9]
-		fmt.Printf("\nSanity check: running in bootstrap mode with IP for for Portal Node (%v), IP for listening (%v), RTT (%v), FlipeProb (%v), FlipInvokeCS (%v), CSSleepTime (%v), shiviz-logfile (%v), and dinv-logfile (%v)\n", ipForPortalNode, ipForListening, RTT, FlipProb, FlipInvokeCS, CSSleepTime, shivizLogfile, dinvLogfile)
+		// fmt.Printf("\nSanity check: running in bootstrap mode with IP for for Portal Node (%v), IP for listening (%v), RTT (%v), FlipeProb (%v), FlipInvokeCS (%v), CSSleepTime (%v), shiviz-logfile (%v), and dinv-logfile (%v)\n", ipForPortalNode, ipForListening, RTT, FlipProb, FlipInvokeCS, CSSleepTime, shivizLogfile, dinvLogfile)
 	} else {
 		panic("Invalid flag. Use -b or -j")
 	}
 }
 
+var mutex = &sync.Mutex{}
 var done chan int = make(chan int, 1)
 var joined chan int = make(chan int, 1)
 var conn net.PacketConn
@@ -151,8 +152,10 @@ func run(isBootstrap bool) {
 	if isBootstrap {
 		thisNode := Node{0, ipForListening, false, true}
 		Nodes = append(Nodes, thisNode)
-		fmt.Printf("\n\n Initialized Nodes with thisNode: %+v", Nodes)
+		N = 1
+		fmt.Printf("\nInitialized Nodes with thisNode: %+v", Nodes)
 		go startListener()
+		go invokeCS()
 		<-done
 	} else {
 		// Connect with Portal Node
@@ -165,43 +168,47 @@ func run(isBootstrap bool) {
 }
 
 func invokeCS() {
-	fmt.Println("Entered invokeCS")
+	fmt.Printf("\n\nEntered invokeCS")
 	rand.Seed(time.Now().UnixNano())
 
 	for {
-		fmt.Printf("\n\nSleeping for %v before trying to invoke CS", FlipInvokeCS)
+		fmt.Printf("\nSleeping for %v before trying to invoke CS", FlipInvokeCS)
 		time.Sleep(time.Millisecond * time.Duration(FlipInvokeCS))
 		f := rand.Float64()
-		fmt.Printf("\n\nFlipped %v (FlipProb is %v", f, FlipProb)
+		fmt.Printf("\nFlipped %v (FlipProb is %v", f, FlipProb)
+		fmt.Printf("\nRequestingCS is %v", requestingCS)
 		if requestingCS == false && f < FlipProb {
-			// TODO Lock
+			mutex.Lock()
 			requestingCS = true
 			ourSequenceNumber = highestSequenceNumber + 1
-			// TODO Unlock
+			mutex.Unlock()
 
 			outstandingReplyCount = N-1
-			fmt.Printf("\n\nNode #%v trying to enter CS with sequence number %v", me, ourSequenceNumber)
+			fmt.Printf("\nNode #%v trying to enter CS with sequence number %v", me, ourSequenceNumber)
 			// Send REQUEST messages to all other nodes
 			for _, node := range Nodes {
 				if node.NodeId != me {
-					fmt.Printf("\n\nSending REQUEST to Node #%v at %v", node.NodeId, node.Address)
+					fmt.Printf("\nSending REQUEST to Node #%v at %v", node.NodeId, node.Address)
 					sendRequestMessage(node, ourSequenceNumber)
 				}
 			}
 			// Wait for REPLY from all other nodes
-			for outstandingReplyCount > 0 { }
+			fmt.Printf("\nOutstanding Reply Count: %v\n", outstandingReplyCount)
+			for outstandingReplyCount > 0 { 
+				// fmt.Printf("%v", outstandingReplyCount)
+			}
 			// Enter CS
-			fmt.Printf("\n\nNode #%v executing CS now...", me)
+			fmt.Printf("\nNode #%v executing CS now...", me)
 			time.Sleep(time.Millisecond * time.Duration(CSSleepTime)) // CS
 
 			requestingCS = false
 			for _, node := range Nodes {
 				if node.NodeId != me && node.ReplyDeferred == true {
-					node.ReplyDeferred = false
 					sendReplyMessage(node)
+					node.ReplyDeferred = false
 				}
 			}
-
+			fmt.Printf("\nReplyDeferred should be false for all nodes: %+v", Nodes)
 		}
 	}
 }
@@ -300,30 +307,32 @@ func handleRequestMessage(requestMessage Message, conn net.PacketConn) {
 	err := json.Unmarshal(requestMessage.Data, &data)
 	checkError(err)
 
-	fmt.Printf("\n\nReceived REQUEST from Node #%v with SequenceNumber %v", requestMessage.SenderId, data.SequenceNumber)
-	if data.SequenceNumber > highestSequenceNumber {
+	fmt.Printf("\nReceived REQUEST from Node #%v with SequenceNumber %v", requestMessage.SenderId, data.SequenceNumber)
+	fmt.Printf("\nMy Node #%v and SequenceNumber %v", me, ourSequenceNumber)
+	if data.SequenceNumber >= highestSequenceNumber {
 		highestSequenceNumber = data.SequenceNumber	
 	}
-	// TODO Lock
+	mutex.Lock()
 	deferRequest := false
 	if requestingCS && ((data.SequenceNumber > ourSequenceNumber) || (data.SequenceNumber == ourSequenceNumber && requestMessage.SenderId > me)) {
 		deferRequest = true
 	}
-	// TODO Unlock
+	mutex.Unlock()
 
-	var node Node
-	for _, n := range Nodes {
+	var idx int
+	for i, n := range Nodes {
 		if n.NodeId == requestMessage.SenderId {
-			node = n
+			idx = i
 		}
 	}
 
 	if deferRequest == true {
-		node.ReplyDeferred = true
+		Nodes[idx].ReplyDeferred = true
 	} else {
-		sendReplyMessage(node)
+		go sendReplyMessage(Nodes[idx])
 	}
-	
+	fmt.Printf("\nChanged ReplyDeferred of Node %+v to %+v", Nodes[idx], deferRequest)
+	fmt.Printf("\nNodes: %+v", Nodes)
 }
 
 func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
@@ -341,10 +350,12 @@ func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
 	fmt.Printf("\n\nNew node: %+v", newNode)
 	Nodes = append(Nodes, newNode)
 	fmt.Printf("\n\nList of nodes: %+v", Nodes)
+	N = len(Nodes)
 
 	acceptData := AcceptData{
 		AssignedNodeId: idxNewNode,
 		ActiveNodes: Nodes,
+		HighestSequenceNumber: highestSequenceNumber,
 	}
 
 	acceptDataJson, err := json.Marshal(acceptData)
@@ -378,7 +389,8 @@ func handleAcceptMessage(acceptMessage Message, conn net.PacketConn) {
 	Nodes = data.ActiveNodes
 	me = data.AssignedNodeId
 	N = len(Nodes)
-	fmt.Printf("\n\nFinal status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v", N, Nodes, me)
+	highestSequenceNumber = data.HighestSequenceNumber
+	fmt.Printf("\n\nFinal status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v and highestSequenceNumber %v", N, Nodes, me, highestSequenceNumber)
 	joined <- 1
 }
 
