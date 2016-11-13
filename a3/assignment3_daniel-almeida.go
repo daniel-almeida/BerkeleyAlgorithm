@@ -41,7 +41,6 @@ type Node struct {
 	NodeId int
 	Address string
 	ReplyDeferred bool
-	Active bool
 }
 
 type Message struct {
@@ -150,7 +149,7 @@ func run(isBootstrap bool) {
 	checkError(err)
 
 	if isBootstrap {
-		thisNode := Node{0, ipForListening, false, true}
+		thisNode := Node{0, ipForListening, false}
 		Nodes = append(Nodes, thisNode)
 		N = 1
 		fmt.Printf("\nInitialized Nodes with thisNode: %+v", Nodes)
@@ -160,7 +159,7 @@ func run(isBootstrap bool) {
 	} else {
 		// Connect with Portal Node
 		go startListener()
-		go joinNetwork()
+		go sendJoinMessage()
 		<- joined
 		go invokeCS()
 		<-done
@@ -175,7 +174,7 @@ func invokeCS() {
 		fmt.Printf("\nSleeping for %v before trying to invoke CS", FlipInvokeCS)
 		time.Sleep(time.Millisecond * time.Duration(FlipInvokeCS))
 		f := rand.Float64()
-		fmt.Printf("\nFlipped %v (FlipProb is %v", f, FlipProb)
+		fmt.Printf("\nFlipped %v (FlipProb is %v)", f, FlipProb)
 		fmt.Printf("\nRequestingCS is %v", requestingCS)
 		if requestingCS == false && f < FlipProb {
 			mutex.Lock()
@@ -208,8 +207,88 @@ func invokeCS() {
 					node.ReplyDeferred = false
 				}
 			}
-			fmt.Printf("\nReplyDeferred should be false for all nodes: %+v", Nodes)
 		}
+	}
+}
+
+func sendNewNodeMessage(node Node) {
+	data := RequestData{}
+	requestData, err := json.Marshal(&data)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	msg := Message{
+		Type: "NEW_NODE",
+		SenderId: me,
+		SenderAddress: ipForListening, 
+		Data: requestData,
+	}
+
+	newNodeMessage, err := json.Marshal(&msg)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeMessage))
+	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
+	conn.WriteTo(newNodeMessage, rAddr)
+}
+
+func sendNewNodeConfirmMessage(node Node) {
+	myHighestSequenceNum := highestSequenceNumber
+	data, err := json.Marshal(&myHighestSequenceNum)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	msg := Message{
+		Type: "CONFIRM_NEW_NODE",
+		SenderId: me,
+		SenderAddress: ipForListening, 
+		Data: data,
+	}
+
+	newNodeConfirmMessage, err := json.Marshal(&msg)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeConfirmMessage))
+	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
+	conn.WriteTo(newNodeConfirmMessage, rAddr)
+}
+
+func handlenewNodeConfirmMessage(newNodeConfirmMessage Message, conn net.PacketConn) {
+	var receivedHighestSequenceNumber int
+	err := json.Unmarshal(newNodeConfirmMessage.Data, &receivedHighestSequenceNumber)
+	checkError(err)
+
+	fmt.Printf("\nReceived NEW_NODE_CONFIRM from Node #%v with HighestSequenceNumber %v", newNodeConfirmMessage.SenderId, receivedHighestSequenceNumber)
+	if receivedHighestSequenceNumber >= highestSequenceNumber {
+		highestSequenceNumber = receivedHighestSequenceNumber
+	}
+}
+
+func handleNewNodeMessage(newNodeMessage Message, conn net.PacketConn) {
+	found := false
+	for _, node := range Nodes {
+		if node.NodeId == me {
+			continue
+		}
+
+		if node.Address == newNodeMessage.SenderAddress && node.NodeId == newNodeMessage.SenderId {
+			found = true
+			break
+		}
+	}
+	if found == false {
+		newNode := Node{
+			NodeId: newNodeMessage.SenderId,
+			Address: newNodeMessage.SenderAddress,
+			ReplyDeferred: false,
+		}
+		Nodes = append(Nodes, newNode)
 	}
 }
 
@@ -232,7 +311,7 @@ func sendReplyMessage(node Node) {
 		fmt.Println(err)
 	}
 
-	fmt.Printf("\n\nMarshalled data: %v\n", string(replyMessage))
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(replyMessage))
 	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
 	conn.WriteTo(replyMessage, rAddr)
 }
@@ -258,7 +337,7 @@ func sendRequestMessage (node Node, sequenceNumber int) {
 		fmt.Println(err)
 	}
 
-	fmt.Printf("\n\nMarshalled data: %v\n", string(requestMessage))
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(requestMessage))
 	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
 	conn.WriteTo(requestMessage, rAddr)
 }
@@ -292,6 +371,10 @@ func startListener() {
 			case "REPLY":
 				// fmt.Printf("\n\nReceived a REPLY message.")
 				go handleReplyMessage(incomingMessage, conn)
+			case "NEW_NODE":
+				go handleNewNodeMessage(incomingMessage, conn)
+			case "CONFIRM_NEW_NODE":
+				go handlenewNodeConfirmMessage(incomingMessage, conn)
 		}
 	}
 	done <- 1
@@ -331,25 +414,25 @@ func handleRequestMessage(requestMessage Message, conn net.PacketConn) {
 	} else {
 		go sendReplyMessage(Nodes[idx])
 	}
-	fmt.Printf("\nChanged ReplyDeferred of Node %+v to %+v", Nodes[idx], deferRequest)
-	fmt.Printf("\nNodes: %+v", Nodes)
+	// fmt.Printf("\nChanged ReplyDeferred of Node %+v to %+v", Nodes[idx], deferRequest)
+	// fmt.Printf("\nNodes: %+v", Nodes)
 }
 
 func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
 	newNodeIP := joinMessage.SenderAddress
 	
 	idxNewNode := len(Nodes)
-	fmt.Printf("\n\nlenght of Nodes slice (and index of newNode): %v", idxNewNode)
+	// fmt.Printf("\n\nlenght of Nodes slice (and index of newNode): %v", idxNewNode)
 	for idx, node := range Nodes {
 		if &node == nil {
 			idxNewNode = idx
 		}
 	}
 
-	newNode := Node{idxNewNode, newNodeIP, false, false}
+	newNode := Node{idxNewNode, newNodeIP, false}
 	fmt.Printf("\n\nNew node: %+v", newNode)
 	Nodes = append(Nodes, newNode)
-	fmt.Printf("\n\nList of nodes: %+v", Nodes)
+	fmt.Printf("\nList of nodes: %+v", Nodes)
 	N = len(Nodes)
 
 	acceptData := AcceptData{
@@ -374,7 +457,7 @@ func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
 	if err != nil {
 		fmt.Println(err)
 	}
-	fmt.Printf("\n\nMarshalled data: %v\n", string(acceptMessageJson))
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(acceptMessageJson))
 
 	rAddr, err := net.ResolveUDPAddr("udp", newNodeIP)
 	checkError(err)
@@ -390,11 +473,16 @@ func handleAcceptMessage(acceptMessage Message, conn net.PacketConn) {
 	me = data.AssignedNodeId
 	N = len(Nodes)
 	highestSequenceNumber = data.HighestSequenceNumber
+	for _, node := range Nodes {
+		if node.NodeId != me {
+			go sendNewNodeMessage(node)	
+		}
+	}
 	fmt.Printf("\n\nFinal status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v and highestSequenceNumber %v", N, Nodes, me, highestSequenceNumber)
 	joined <- 1
 }
 
-func joinNetwork() {
+func sendJoinMessage() {
 	JoinMessageData := JoinData{ipForListening}
 	
 	data, err := json.Marshal(&JoinMessageData)
@@ -414,7 +502,7 @@ func joinNetwork() {
 		fmt.Println(err)
 	}
 
-	fmt.Printf("\n\nMarshalled data: %v\n", string(joinData))
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(joinData))
 	rAddr, err := net.ResolveUDPAddr("udp", ipForPortalNode)
 	conn.WriteTo(joinData, rAddr)
 }
