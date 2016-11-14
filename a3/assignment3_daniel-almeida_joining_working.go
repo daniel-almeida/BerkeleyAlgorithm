@@ -41,50 +41,6 @@ type Node struct {
 	NodeId int
 	Address string
 	ReplyDeferred bool
-	Alive bool
-	AwaitingReply bool
-	IsThere bool
-}
-
-func findNode(nodeId int) *Node {
-	for idx, node := range Nodes {
-		if node.NodeId == nodeId {
-			return &Nodes[idx]
-		}
-	}
-	return nil
-}
-
-func countNodesAlive() int {
-	count := 0 
-	for _, node := range Nodes {
-		if node.NodeId != me {
-			if node.Alive {
-				count++
-			}
-		}
-	}
-	return count
-}
-
-func requestTimeout(n *Node) {
-	fmt.Printf("\n\nEntering requestTimeout...")
-	timer := time.NewTimer((time.Millisecond * time.Duration(RTT)) + time.Duration(CSSleepTime))
-	<-timer.C
-	fmt.Printf("\nNode #%v timed out. AwaitingReply is %v", n.NodeId, n.AwaitingReply)
-	for n.AwaitingReply == true {
-		n.IsThere = false
-		sendAreYouThereMessage(*n)
-		timer = time.NewTimer((time.Millisecond * time.Duration(RTT)) + time.Duration(CSSleepTime))
-		<-timer.C
-		if n.AwaitingReply == true && n.IsThere == false {
-			fmt.Printf("\nNode #%v has died.", n.NodeId)
-			n.Alive = false
-			outstandingReplyCount = outstandingReplyCount - 1
-			N = N-1
-			break
-		}
-	}
 }
 
 type Message struct {
@@ -108,23 +64,6 @@ type AcceptData struct {
 	HighestSequenceNumber int
 }
 
-var mutex = &sync.Mutex{}
-var done chan int = make(chan int, 1)
-var joined chan int = make(chan int, 1)
-var conn net.PacketConn
-var err error
-
-func main() {
-	parseArgs()
-
-	if ModeFlag == "-b" {
-		run(true)
-	} else if ModeFlag == "-j" {
-		run(false)
-	}
-
-	fmt.Println("Hello world.")
-}
 
 // Parses all Args
 func parseArgs() {
@@ -187,18 +126,35 @@ func parseArgs() {
 	}
 }
 
+var mutex = &sync.Mutex{}
+var done chan int = make(chan int, 1)
+var joined chan int = make(chan int, 1)
+var conn net.PacketConn
+var err error
+
+func main() {
+	parseArgs()
+
+	if ModeFlag == "-b" {
+		run(true)
+	} else if ModeFlag == "-j" {
+		run(false)
+	}
+
+	fmt.Println("Hello world.")
+}
+
 func run(isBootstrap bool) {
 	conn, err = net.ListenPacket("udp", ipForListening)
 	checkError(err)
 
 	if isBootstrap {
-		thisNode := Node{0, ipForListening, false, true, false, false}
+		thisNode := Node{0, ipForListening, false}
 		Nodes = append(Nodes, thisNode)
 		N = 1
 		fmt.Printf("\nInitialized Nodes with thisNode: %+v", Nodes)
 		go startListener()
 		go invokeCS()
-		// Testing findNode
 		<-done
 	} else {
 		// Connect with Portal Node
@@ -228,14 +184,11 @@ func invokeCS() {
 
 			outstandingReplyCount = N-1
 			fmt.Printf("\nNode #%v trying to enter CS with sequence number %v", me, ourSequenceNumber)
-			fmt.Printf("\nNODES ALIVE: %v", countNodesAlive())
 			// Send REQUEST messages to all other nodes
-			for i, node := range Nodes {
-				if node.NodeId != me { //&& node.Alive == true {
+			for _, node := range Nodes {
+				if node.NodeId != me {
 					fmt.Printf("\nSending REQUEST to Node #%v at %v", node.NodeId, node.Address)
-					Nodes[i].AwaitingReply = true
-					go sendRequestMessage(node, ourSequenceNumber)
-					go requestTimeout(&Nodes[i])
+					sendRequestMessage(node, ourSequenceNumber)
 				}
 			}
 			// Wait for REPLY from all other nodes
@@ -254,118 +207,6 @@ func invokeCS() {
 					node.ReplyDeferred = false
 				}
 			}
-		}
-	}
-}
-
-func startListener() {
-	// lAddr, err := net.ResolveUDPAddr("udp", ipForListening)
-	// checkError(err)
-
-	b := make([]byte, 1024)
-	for {
-		var incomingMessage Message
-		n, _, err := conn.ReadFrom(b)
-		if err != nil {
-			fmt.Println(err)
-			continue
-		}
-
-		err = json.Unmarshal(b[:n], &incomingMessage)
-		// fmt.Printf("\n\n%vReceived msg after Unmarshal: %+v\n", msgReceived)
-
-		switch incomingMessage.Type {
-    		case "JOIN":
-    			// fmt.Printf("\n\n%vReceived a JOIN message.\n")
-				go handleJoinMessage(incomingMessage, conn)
-			case "ACCEPT":
-				// fmt.Printf("\n\n%vReceived an ACCEPT message.")
-				go handleAcceptMessage(incomingMessage, conn)
-			case "REQUEST":
-				// fmt.Printf("\n\n%vReceived a REQUEST message.")
-				go handleRequestMessage(incomingMessage, conn)
-			case "REPLY":
-				// fmt.Printf("\n\n%vReceived a REPLY message.")
-				go handleReplyMessage(incomingMessage, conn)
-			case "NEW_NODE":
-				go handleNewNodeMessage(incomingMessage, conn)
-			case "CONFIRM_NEW_NODE":
-				go handlenewNodeConfirmMessage(incomingMessage, conn)
-			case "ARE_YOU_THERE":
-				go handleAreYouThereMessage(incomingMessage, conn)
-			case "I_AM_HERE":
-				go handleIAmHereMessage(incomingMessage, conn)
-		}
-	}
-	done <- 1
-}
-
-func sendAreYouThereMessage(node Node) {
-	data := RequestData{}
-	requestData, err := json.Marshal(&data)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	msg := Message{
-		Type: "ARE_YOU_THERE",
-		SenderId: me,
-		SenderAddress: ipForListening, 
-		Data: requestData,
-	}
-
-	areYouThereMessage, err := json.Marshal(&msg)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	// fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeMessage))
-	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
-	conn.WriteTo(areYouThereMessage, rAddr)
-}
-
-func handleAreYouThereMessage(areYouThereMessage Message, conn net.PacketConn) {
-	fmt.Printf("\nReceived ARE_YOU_THERE from Node #%v", areYouThereMessage.SenderId)
-	for idx, node := range Nodes {
-		if node.NodeId == areYouThereMessage.SenderId {
-			if Nodes[idx].ReplyDeferred == false {
-				sendReplyMessage(node)
-			} else {
-				sendIAmHereMessage(node)
-			}
-		}
-	}
-}
-
-func sendIAmHereMessage(node Node) {
-	data := RequestData{}
-	requestData, err := json.Marshal(&data)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	msg := Message{
-		Type: "I_AM_HERE",
-		SenderId: me,
-		SenderAddress: ipForListening, 
-		Data: requestData,
-	}
-
-	iAmHereMessage, err := json.Marshal(&msg)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	// fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeMessage))
-	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
-	conn.WriteTo(iAmHereMessage, rAddr)
-}
-
-func handleIAmHereMessage(iAmHereMessage Message, conn net.PacketConn) {
-	fmt.Printf("\n\nReceived I_AM_HERE message from Node #%v", iAmHereMessage.SenderId)
-	for idx, node := range Nodes {
-		if node.NodeId == iAmHereMessage.SenderId {
-			Nodes[idx].IsThere = true
 		}
 	}
 }
@@ -394,31 +235,6 @@ func sendNewNodeMessage(node Node) {
 	conn.WriteTo(newNodeMessage, rAddr)
 }
 
-func handleNewNodeMessage(newNodeMessage Message, conn net.PacketConn) {
-	found := false
-	for _, node := range Nodes {
-		if node.NodeId == me {
-			continue
-		}
-
-		if node.Address == newNodeMessage.SenderAddress && node.NodeId == newNodeMessage.SenderId {
-			found = true
-			break
-		}
-	}
-	if found == false {
-		newNode := Node{
-			NodeId: newNodeMessage.SenderId,
-			Address: newNodeMessage.SenderAddress,
-			ReplyDeferred: false,
-			Alive: true,
-			AwaitingReply: false,
-			IsThere: false,
-		}
-		Nodes = append(Nodes, newNode)
-	}
-}
-
 func sendNewNodeConfirmMessage(node Node) {
 	myHighestSequenceNum := highestSequenceNumber
 	data, err := json.Marshal(&myHighestSequenceNum)
@@ -438,7 +254,7 @@ func sendNewNodeConfirmMessage(node Node) {
 		fmt.Println(err)
 	}
 
-	// fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeConfirmMessage))
+	fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeConfirmMessage))
 	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
 	conn.WriteTo(newNodeConfirmMessage, rAddr)
 }
@@ -454,6 +270,52 @@ func handlenewNodeConfirmMessage(newNodeConfirmMessage Message, conn net.PacketC
 	}
 }
 
+func handleNewNodeMessage(newNodeMessage Message, conn net.PacketConn) {
+	found := false
+	for _, node := range Nodes {
+		if node.NodeId == me {
+			continue
+		}
+
+		if node.Address == newNodeMessage.SenderAddress && node.NodeId == newNodeMessage.SenderId {
+			found = true
+			break
+		}
+	}
+	if found == false {
+		newNode := Node{
+			NodeId: newNodeMessage.SenderId,
+			Address: newNodeMessage.SenderAddress,
+			ReplyDeferred: false,
+		}
+		Nodes = append(Nodes, newNode)
+	}
+}
+
+func sendReplyMessage(node Node) {
+	data := RequestData{}
+	requestData, err := json.Marshal(&data)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	msg := Message{
+		Type: "REPLY",
+		SenderId: me,
+		SenderAddress: ipForListening, 
+		Data: requestData,
+	}
+
+	replyMessage, err := json.Marshal(&msg)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(replyMessage))
+	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
+	conn.WriteTo(replyMessage, rAddr)
+}
+
 func sendRequestMessage (node Node, sequenceNumber int) {
 	requestData := RequestData{sequenceNumber}
 	
@@ -461,7 +323,7 @@ func sendRequestMessage (node Node, sequenceNumber int) {
 	if err != nil {
 		fmt.Println(err)
 	}
-	// fmt.Printf("\n\n%vMarshalled JoingMessageData: %v\n", string(data))
+	// fmt.Printf("\n\nMarshalled JoingMessageData: %v\n", string(data))
 
 	msg := Message{
 		Type: "REQUEST",
@@ -475,9 +337,52 @@ func sendRequestMessage (node Node, sequenceNumber int) {
 		fmt.Println(err)
 	}
 
-	// fmt.Printf("\n\n%vMarshalled data: %v\n", string(requestMessage))
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(requestMessage))
 	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
 	conn.WriteTo(requestMessage, rAddr)
+}
+
+func startListener() {
+	// lAddr, err := net.ResolveUDPAddr("udp", ipForListening)
+	// checkError(err)
+
+	b := make([]byte, 1024)
+	for {
+		var incomingMessage Message
+		n, _, err := conn.ReadFrom(b)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+
+		err = json.Unmarshal(b[:n], &incomingMessage)
+		// fmt.Printf("\n\nReceived msg after Unmarshal: %+v\n", msgReceived)
+
+		switch incomingMessage.Type {
+    		case "JOIN":
+    			// fmt.Printf("\n\nReceived a JOIN message.\n")
+				go handleJoinMessage(incomingMessage, conn)
+			case "ACCEPT":
+				// fmt.Printf("\n\nReceived an ACCEPT message.")
+				go handleAcceptMessage(incomingMessage, conn)
+			case "REQUEST":
+				// fmt.Printf("\n\nReceived a REQUEST message.")
+				go handleRequestMessage(incomingMessage, conn)
+			case "REPLY":
+				// fmt.Printf("\n\nReceived a REPLY message.")
+				go handleReplyMessage(incomingMessage, conn)
+			case "NEW_NODE":
+				go handleNewNodeMessage(incomingMessage, conn)
+			case "CONFIRM_NEW_NODE":
+				go handlenewNodeConfirmMessage(incomingMessage, conn)
+		}
+	}
+	done <- 1
+}
+
+func handleReplyMessage(replyMessage Message, conn net.PacketConn) {
+	outstandingReplyCount = outstandingReplyCount - 1
+	fmt.Printf("\n\nReceived REPLY from Node #%v", replyMessage.SenderId)	
 }
 
 func handleRequestMessage(requestMessage Message, conn net.PacketConn) {
@@ -513,63 +418,6 @@ func handleRequestMessage(requestMessage Message, conn net.PacketConn) {
 	// fmt.Printf("\nNodes: %+v", Nodes)
 }
 
-func sendReplyMessage(node Node) {
-	data := RequestData{}
-	requestData, err := json.Marshal(&data)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	msg := Message{
-		Type: "REPLY",
-		SenderId: me,
-		SenderAddress: ipForListening, 
-		Data: requestData,
-	}
-
-	replyMessage, err := json.Marshal(&msg)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	// fmt.Printf("\n\n%vMarshalled data: %v\n", string(replyMessage))
-	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
-	conn.WriteTo(replyMessage, rAddr)
-}
-
-func handleReplyMessage(replyMessage Message, conn net.PacketConn) {
-	fmt.Printf("\n\nReceived REPLY from Node #%v", replyMessage.SenderId)
-	node := findNode(replyMessage.SenderId)
-	node.AwaitingReply = false
-	outstandingReplyCount = outstandingReplyCount - 1
-
-}
-
-func sendJoinMessage() {
-	JoinMessageData := JoinData{ipForListening}
-	
-	data, err := json.Marshal(&JoinMessageData)
-	if err != nil {
-		fmt.Println(err)
-	}
-	// fmt.Printf("\n\n%vMarshalled JoingMessageData: %v\n", string(data))
-
-	msg := Message{
-		Type: "JOIN",
-		SenderAddress: ipForListening, 
-		Data: data,
-	}
-
-	joinData, err := json.Marshal(&msg)
-	if err != nil {
-		fmt.Println(err)
-	}
-
-	// fmt.Printf("\n\nMarshalled data: %v\n", string(joinData))
-	rAddr, err := net.ResolveUDPAddr("udp", ipForPortalNode)
-	conn.WriteTo(joinData, rAddr)
-}
-
 func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
 	newNodeIP := joinMessage.SenderAddress
 	
@@ -581,23 +429,14 @@ func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
 		}
 	}
 
-	newNode := Node{
-		NodeId: idxNewNode, 
-		Address: newNodeIP, 
-		ReplyDeferred: false,
-	}
-
+	newNode := Node{idxNewNode, newNodeIP, false}
 	fmt.Printf("\n\nNew node: %+v", newNode)
 	Nodes = append(Nodes, newNode)
 	fmt.Printf("\nList of nodes: %+v", Nodes)
 	N = len(Nodes)
 
-	go sendAcceptMessage(newNode, idxNewNode)
-}
-
-func sendAcceptMessage(node Node, idNewNode int) {
 	acceptData := AcceptData{
-		AssignedNodeId: idNewNode,
+		AssignedNodeId: idxNewNode,
 		ActiveNodes: Nodes,
 		HighestSequenceNumber: highestSequenceNumber,
 	}
@@ -620,9 +459,9 @@ func sendAcceptMessage(node Node, idNewNode int) {
 	}
 	// fmt.Printf("\n\nMarshalled data: %v\n", string(acceptMessageJson))
 
-	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
+	rAddr, err := net.ResolveUDPAddr("udp", newNodeIP)
 	checkError(err)
-	conn.WriteTo(acceptMessageJson, rAddr)
+	conn.WriteTo(acceptMessageJson, rAddr)	
 }
 
 func handleAcceptMessage(acceptMessage Message, conn net.PacketConn) {
@@ -639,8 +478,33 @@ func handleAcceptMessage(acceptMessage Message, conn net.PacketConn) {
 			go sendNewNodeMessage(node)	
 		}
 	}
-	fmt.Printf("\n\n[%v]Final status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v and highestSequenceNumber %v", N, Nodes, me, highestSequenceNumber)
+	fmt.Printf("\n\nFinal status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v and highestSequenceNumber %v", N, Nodes, me, highestSequenceNumber)
 	joined <- 1
+}
+
+func sendJoinMessage() {
+	JoinMessageData := JoinData{ipForListening}
+	
+	data, err := json.Marshal(&JoinMessageData)
+	if err != nil {
+		fmt.Println(err)
+	}
+	// fmt.Printf("\n\nMarshalled JoingMessageData: %v\n", string(data))
+
+	msg := Message{
+		Type: "JOIN",
+		SenderAddress: ipForListening, 
+		Data: data,
+	}
+
+	joinData, err := json.Marshal(&msg)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	// fmt.Printf("\n\nMarshalled data: %v\n", string(joinData))
+	rAddr, err := net.ResolveUDPAddr("udp", ipForPortalNode)
+	conn.WriteTo(joinData, rAddr)
 }
 
 func checkError(err error) {
