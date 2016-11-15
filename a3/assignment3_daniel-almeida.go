@@ -33,8 +33,10 @@ var (
 	Nodes []Node = make([]Node, 0)
 	ourSequenceNumber int
 	highestSequenceNumber int
+	highestNodeId int
 	outstandingReplyCount int
 	requestingCS bool = false
+	joinedNetwork bool = false
 )
 
 type Node struct {
@@ -55,6 +57,15 @@ func findNode(nodeId int) *Node {
 	return nil
 }
 
+func removeNodeById(nodeId int) {
+	for i, n := range Nodes {
+		if n.NodeId != me && n.NodeId == nodeId {
+			Nodes = append(Nodes[:i], Nodes[i+1:]...)
+		}
+	}
+	
+}
+
 func countNodesAlive() int {
 	count := 0 
 	for _, node := range Nodes {
@@ -68,7 +79,7 @@ func countNodesAlive() int {
 }
 
 func requestTimeout(n *Node) {
-	fmt.Printf("\n\nEntering requestTimeout...")
+	fmt.Printf("\nEntering requestTimeout...")
 	timer := time.NewTimer((time.Millisecond * time.Duration(RTT)) + time.Duration(CSSleepTime))
 	<-timer.C
 	fmt.Printf("\nNode #%v timed out. AwaitingReply is %v", n.NodeId, n.AwaitingReply)
@@ -80,8 +91,9 @@ func requestTimeout(n *Node) {
 		if n.AwaitingReply == true && n.IsThere == false {
 			fmt.Printf("\nNode #%v has died.", n.NodeId)
 			n.Alive = false
+			removeNodeById(n.NodeId)
 			outstandingReplyCount = outstandingReplyCount - 1
-			N = N-1
+			N--
 			break
 		}
 	}
@@ -193,8 +205,9 @@ func run(isBootstrap bool) {
 
 	if isBootstrap {
 		thisNode := Node{0, ipForListening, false, true, false, false}
+		highestNodeId = 0
 		Nodes = append(Nodes, thisNode)
-		N = 1
+		N = 0
 		fmt.Printf("\nInitialized Nodes with thisNode: %+v", Nodes)
 		go startListener()
 		go invokeCS()
@@ -204,7 +217,21 @@ func run(isBootstrap bool) {
 		// Connect with Portal Node
 		go startListener()
 		go sendJoinMessage()
-		<- joined
+		timer := time.NewTimer(time.Millisecond * time.Duration(2 * RTT))
+		<-timer.C
+		if joinedNetwork == false {
+			// Print something and exit
+			fmt.Println("Portal node didn't respond in 2 RTTs. Exiting now...")
+			os.Exit(1)
+		}
+		// We consider all nodes that are still not Alive to be actually dead
+		// because they didn't reply to our NewNodeMessage. Those nodes will be deleted.
+		for _, node := range Nodes {
+			if node.NodeId != me && node.Alive == false {
+				removeNodeById(node.NodeId)
+			}
+		}
+		N = len(Nodes)
 		go invokeCS()
 		<-done
 	}
@@ -226,7 +253,7 @@ func invokeCS() {
 			ourSequenceNumber = highestSequenceNumber + 1
 			mutex.Unlock()
 
-			outstandingReplyCount = N-1
+			outstandingReplyCount = N
 			fmt.Printf("\nNode #%v trying to enter CS with sequence number %v", me, ourSequenceNumber)
 			fmt.Printf("\nNODES ALIVE: %v", countNodesAlive())
 			// Send REQUEST messages to all other nodes
@@ -244,9 +271,13 @@ func invokeCS() {
 				// fmt.Printf("%v", outstandingReplyCount)
 			}
 			// Enter CS
-			fmt.Printf("\nNode #%v executing CS now...", me)
+			fmt.Printf("\n\n------------------------")
+			fmt.Printf("\nNODE #%v EXECUTING CS... [ %v ]", me, time.Now())
+			fmt.Println("\n-------------------------")
 			time.Sleep(time.Millisecond * time.Duration(CSSleepTime)) // CS
-
+			fmt.Printf("\n\n------------------------")
+			fmt.Printf("\nNODE #%v LEAVING CS ... [ %v ]", me, time.Now())
+			fmt.Println("\n-------------------------")
 			requestingCS = false
 			for _, node := range Nodes {
 				if node.NodeId != me && node.ReplyDeferred == true {
@@ -276,21 +307,17 @@ func startListener() {
 
 		switch incomingMessage.Type {
     		case "JOIN":
-    			// fmt.Printf("\n\n%vReceived a JOIN message.\n")
 				go handleJoinMessage(incomingMessage, conn)
 			case "ACCEPT":
-				// fmt.Printf("\n\n%vReceived an ACCEPT message.")
 				go handleAcceptMessage(incomingMessage, conn)
 			case "REQUEST":
-				// fmt.Printf("\n\n%vReceived a REQUEST message.")
 				go handleRequestMessage(incomingMessage, conn)
 			case "REPLY":
-				// fmt.Printf("\n\n%vReceived a REPLY message.")
 				go handleReplyMessage(incomingMessage, conn)
 			case "NEW_NODE":
 				go handleNewNodeMessage(incomingMessage, conn)
 			case "CONFIRM_NEW_NODE":
-				go handlenewNodeConfirmMessage(incomingMessage, conn)
+				go handleNewNodeConfirmMessage(incomingMessage, conn)
 			case "ARE_YOU_THERE":
 				go handleAreYouThereMessage(incomingMessage, conn)
 			case "I_AM_HERE":
@@ -319,21 +346,22 @@ func sendAreYouThereMessage(node Node) {
 		fmt.Println(err)
 	}
 
-	// fmt.Printf("\n\nMarshalled data: %v\n", string(newNodeMessage))
 	rAddr, err := net.ResolveUDPAddr("udp", node.Address)
 	conn.WriteTo(areYouThereMessage, rAddr)
 }
 
 func handleAreYouThereMessage(areYouThereMessage Message, conn net.PacketConn) {
 	fmt.Printf("\nReceived ARE_YOU_THERE from Node #%v", areYouThereMessage.SenderId)
-	for idx, node := range Nodes {
-		if node.NodeId == areYouThereMessage.SenderId {
-			if Nodes[idx].ReplyDeferred == false {
-				sendReplyMessage(node)
-			} else {
-				sendIAmHereMessage(node)
-			}
-		}
+	node := findNode(areYouThereMessage.SenderId)
+	if node == nil {
+		fmt.Printf("\nReceived a message from dead node (#%v).", areYouThereMessage.SenderId)
+		return
+	}
+
+	if node.ReplyDeferred == false {
+		sendReplyMessage(*node)
+	} else {
+		sendIAmHereMessage(*node)
 	}
 }
 
@@ -362,12 +390,13 @@ func sendIAmHereMessage(node Node) {
 }
 
 func handleIAmHereMessage(iAmHereMessage Message, conn net.PacketConn) {
-	fmt.Printf("\n\nReceived I_AM_HERE message from Node #%v", iAmHereMessage.SenderId)
-	for idx, node := range Nodes {
-		if node.NodeId == iAmHereMessage.SenderId {
-			Nodes[idx].IsThere = true
-		}
+	fmt.Printf("\nReceived I_AM_HERE message from Node #%v", iAmHereMessage.SenderId)
+	node := findNode(iAmHereMessage.SenderId)
+	if node == nil {
+		fmt.Printf("\nReceived a message from dead node (#%v).", iAmHereMessage.SenderId)
+		return
 	}
+	node.IsThere = true
 }
 
 func sendNewNodeMessage(node Node) {
@@ -395,28 +424,24 @@ func sendNewNodeMessage(node Node) {
 }
 
 func handleNewNodeMessage(newNodeMessage Message, conn net.PacketConn) {
-	found := false
-	for _, node := range Nodes {
-		if node.NodeId == me {
-			continue
-		}
+	node := findNode(newNodeMessage.SenderId)
+	if node != nil {
+		fmt.Printf("\nReceived a newNodeMessage from a node that already exists. (#%v).", newNodeMessage.SenderId)
+		return
+	}
 
-		if node.Address == newNodeMessage.SenderAddress && node.NodeId == newNodeMessage.SenderId {
-			found = true
-			break
-		}
+	newNode := Node{
+		NodeId: newNodeMessage.SenderId,
+		Address: newNodeMessage.SenderAddress,
+		ReplyDeferred: false,
+		Alive: true,
+		AwaitingReply: false,
+		IsThere: false,
 	}
-	if found == false {
-		newNode := Node{
-			NodeId: newNodeMessage.SenderId,
-			Address: newNodeMessage.SenderAddress,
-			ReplyDeferred: false,
-			Alive: true,
-			AwaitingReply: false,
-			IsThere: false,
-		}
-		Nodes = append(Nodes, newNode)
-	}
+	Nodes = append(Nodes, newNode)
+	// N = len(Nodes)
+	go sendNewNodeConfirmMessage(newNode)
+	N++
 }
 
 func sendNewNodeConfirmMessage(node Node) {
@@ -443,12 +468,19 @@ func sendNewNodeConfirmMessage(node Node) {
 	conn.WriteTo(newNodeConfirmMessage, rAddr)
 }
 
-func handlenewNodeConfirmMessage(newNodeConfirmMessage Message, conn net.PacketConn) {
+func handleNewNodeConfirmMessage(newNodeConfirmMessage Message, conn net.PacketConn) {
 	var receivedHighestSequenceNumber int
 	err := json.Unmarshal(newNodeConfirmMessage.Data, &receivedHighestSequenceNumber)
 	checkError(err)
 
 	fmt.Printf("\nReceived NEW_NODE_CONFIRM from Node #%v with HighestSequenceNumber %v", newNodeConfirmMessage.SenderId, receivedHighestSequenceNumber)
+	node := findNode(newNodeConfirmMessage.SenderId)
+	if node == nil {
+		fmt.Printf("\nReceived a NEW_NODE_CONFIRM message from dead Node (#%v).")
+		return
+	}
+	// Node replied to newNodeMessage and will be considered Alive (see handleAcceptMessage)
+	node.Alive = true
 	if receivedHighestSequenceNumber >= highestSequenceNumber {
 		highestSequenceNumber = receivedHighestSequenceNumber
 	}
@@ -486,7 +518,19 @@ func handleRequestMessage(requestMessage Message, conn net.PacketConn) {
 	checkError(err)
 
 	fmt.Printf("\nReceived REQUEST from Node #%v with SequenceNumber %v", requestMessage.SenderId, data.SequenceNumber)
-	fmt.Printf("\nMy Node #%v and SequenceNumber %v", me, ourSequenceNumber)
+	node := findNode(requestMessage.SenderId)
+	if node == nil {
+		fmt.Printf("\nReceived a message from dead node (#%v).", requestMessage.SenderId)
+		return
+	}
+
+	if node.NodeId > highestNodeId {
+		mutex.Lock()
+		highestNodeId = node.NodeId
+		mutex.Unlock()
+	}
+
+	// fmt.Printf("\nMy Node #%v and SequenceNumber %v", me, ourSequenceNumber)
 	if data.SequenceNumber >= highestSequenceNumber {
 		highestSequenceNumber = data.SequenceNumber	
 	}
@@ -497,17 +541,10 @@ func handleRequestMessage(requestMessage Message, conn net.PacketConn) {
 	}
 	mutex.Unlock()
 
-	var idx int
-	for i, n := range Nodes {
-		if n.NodeId == requestMessage.SenderId {
-			idx = i
-		}
-	}
-
 	if deferRequest == true {
-		Nodes[idx].ReplyDeferred = true
+		node.ReplyDeferred = true
 	} else {
-		go sendReplyMessage(Nodes[idx])
+		go sendReplyMessage(*node)
 	}
 	// fmt.Printf("\nChanged ReplyDeferred of Node %+v to %+v", Nodes[idx], deferRequest)
 	// fmt.Printf("\nNodes: %+v", Nodes)
@@ -538,8 +575,12 @@ func sendReplyMessage(node Node) {
 }
 
 func handleReplyMessage(replyMessage Message, conn net.PacketConn) {
-	fmt.Printf("\n\nReceived REPLY from Node #%v", replyMessage.SenderId)
+	fmt.Printf("\nReceived REPLY from Node #%v", replyMessage.SenderId)
 	node := findNode(replyMessage.SenderId)
+	if node == nil {
+		fmt.Printf("\nReceived a message from dead node (#%v).", replyMessage.SenderId)
+		return
+	}
 	node.AwaitingReply = false
 	outstandingReplyCount = outstandingReplyCount - 1
 
@@ -573,31 +614,27 @@ func sendJoinMessage() {
 func handleJoinMessage(joinMessage Message, conn net.PacketConn) {
 	newNodeIP := joinMessage.SenderAddress
 	
-	idxNewNode := len(Nodes)
-	// fmt.Printf("\n\nlenght of Nodes slice (and index of newNode): %v", idxNewNode)
-	for idx, node := range Nodes {
-		if &node == nil {
-			idxNewNode = idx
-		}
-	}
+	// Determine NodeId for newNode
+	// TODO this has to be mutually shared between all nodes.
+	mutex.Lock()
+	highestNodeId++
+	newNodeId := highestNodeId
+	mutex.Unlock()
 
-	newNode := Node{
-		NodeId: idxNewNode, 
+	tempNewNode := Node{
+		NodeId: newNodeId, 
 		Address: newNodeIP, 
 		ReplyDeferred: false,
 	}
 
-	fmt.Printf("\n\nNew node: %+v", newNode)
-	Nodes = append(Nodes, newNode)
-	fmt.Printf("\nList of nodes: %+v", Nodes)
-	N = len(Nodes)
+	fmt.Printf("\n\nNODE REQUESTING TO JOIN: %+v", tempNewNode)
 
-	go sendAcceptMessage(newNode, idxNewNode)
+	go sendAcceptMessage(tempNewNode, newNodeId)
 }
 
-func sendAcceptMessage(node Node, idNewNode int) {
+func sendAcceptMessage(node Node, newNodeId int) {
 	acceptData := AcceptData{
-		AssignedNodeId: idNewNode,
+		AssignedNodeId: newNodeId,
 		ActiveNodes: Nodes,
 		HighestSequenceNumber: highestSequenceNumber,
 	}
@@ -632,15 +669,32 @@ func handleAcceptMessage(acceptMessage Message, conn net.PacketConn) {
 
 	Nodes = data.ActiveNodes
 	me = data.AssignedNodeId
-	N = len(Nodes)
+	if me > highestNodeId {
+		mutex.Lock()
+		highestNodeId = me
+		mutex.Unlock()
+	}
+	// N = len(Nodes)
 	highestSequenceNumber = data.HighestSequenceNumber
-	for _, node := range Nodes {
+	for i, node := range Nodes {
 		if node.NodeId != me {
-			go sendNewNodeMessage(node)	
+			// All other nodes are considered dead until they reply 
+			// to newNodeMessage with newNodeConfirmMessage
+		Nodes[i].Alive = false 
+		go sendNewNodeMessage(node)	
 		}
 	}
-	fmt.Printf("\n\n[%v]Final status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v and highestSequenceNumber %v", N, Nodes, me, highestSequenceNumber)
-	joined <- 1
+	// timer := time.NewTimer(time.Millisecond * time.Duration(RTT))
+	// <-timer.C
+	// We wait RTT and consider all nodes that are still not Alive to be actually dead
+	// because they didn't reply to our NewNodeMessage. Those nodes will be deleted.
+	// for _, node := range Nodes {
+	// 	if node.NodeId != me && node.Alive == false {
+	// 		removeNodeById(node.NodeId)
+	// 	}
+	// }
+	fmt.Printf("\n\nFinal status of Joining Node\nNumber of nodes: %+v; \nNodes: %+v; \nI am Node #%v and highestSequenceNumber %v", N, Nodes, me, highestSequenceNumber)
+	joinedNetwork = true
 }
 
 func checkError(err error) {
