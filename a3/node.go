@@ -86,7 +86,8 @@ func requestTimeout(n *Node) {
 	for n.AwaitingReply == true {
 		n.IsThere = false
 		sendAreYouThereMessage(*n)
-		timer = time.NewTimer((time.Millisecond * time.Duration(RTT)) + time.Duration(CSSleepTime))
+		// timer = time.NewTimer((time.Millisecond * time.Duration(RTT)) + time.Duration(CSSleepTime))
+		timer = time.NewTimer(time.Millisecond * time.Duration(RTT))
 		<-timer.C
 		if n.AwaitingReply == true && n.IsThere == false {
 			fmt.Printf("\nNode #%v has died.", n.NodeId)
@@ -278,13 +279,15 @@ func invokeCS() {
 			fmt.Printf("\n\n------------------------")
 			fmt.Printf("\nNODE #%v LEAVING CS ... [ %v ]", me, time.Now())
 			fmt.Println("\n-------------------------")
-			requestingCS = false
-			for _, node := range Nodes {
+			for i, node := range Nodes {
 				if node.NodeId != me && node.ReplyDeferred == true {
 					sendReplyMessage(node)
-					node.ReplyDeferred = false
+					Nodes[i].ReplyDeferred = false
 				}
 			}
+			mutex.Lock()
+			requestingCS = false
+			mutex.Unlock()
 		}
 	}
 }
