@@ -1,5 +1,7 @@
 # BerkeleyAlgo
 .vscode
+*Log.txt
+*Encoded.txt
 
 # Compiled Object files, Static and Dynamic libs (Shared Objects)
 *.o
