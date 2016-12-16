@@ -7,22 +7,27 @@
 **Details:**
 
 [1] https://en.wikipedia.org/wiki/Berkeley_algorithm
+
 [2] Original paper: The Accuracy of the Clock Synchronization Achieved by TEMPO in Berkeley UNIX 4.3BSD (http://dl.acm.org/citation.cfm?id=69640)
 
 **Features and limitations:**
 1. Handles message loss and delay
+
 2. Tolerates slave failures
 
 **Assumptions:**
 1. Master never fails
+
 2. List of slaves is known and fixed
+
 3. Clock values are monotonically increasing integers
+
 
 **For help with building/compiling:** https://golang.org/doc/code.html
 
 **Running Master**
 
-\# ./BerkeleyAlgorithm <MODE FLAG (-m)> <LISTEN ADDRESS (IP:PORT)> <INITIAL LOCAL CLOCK/TIME> <THRESHOLD FOR FAULT-TOLERANT AVERAGE> <FILE WITH LIST OF SLAVES>
+\# ./BerkeleyAlgorithm \<MODE FLAG (-m)\> \<LISTEN ADDRESS (IP:PORT)\> \<INITIAL LOCAL CLOCK/TIME\> \<THRESHOLD FOR FAULT-TOLERANT AVERAGE\> \<FILE WITH LIST OF SLAVES\>
 
 Example:
 
@@ -30,7 +35,7 @@ Example:
 
 **Running Slave**
 
-\# ./BerkeleyAlgorithm <MODE FLAG (-s)> <LISTEN ADDRESS (IP:PORT)> <INITIAL LOCAL CLOCK/TIME>
+\# ./BerkeleyAlgorithm \<MODE FLAG (-s)\> \<LISTEN ADDRESS (IP:PORT)\> \<INITIAL LOCAL CLOCK/TIME\>
 
 Example (3 slaves)
 
