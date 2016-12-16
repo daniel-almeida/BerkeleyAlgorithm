@@ -11,11 +11,13 @@
 [2] Original paper: The Accuracy of the Clock Synchronization Achieved by TEMPO in Berkeley UNIX 4.3BSD (http://dl.acm.org/citation.cfm?id=69640)
 
 **Features and limitations:**
+
 1. Handles message loss and delay
 
 2. Tolerates slave failures
 
 **Assumptions:**
+
 1. Master never fails
 
 2. List of slaves is known and fixed
