@@ -1,5 +1,3 @@
-/* CPSC 538B - Distributed Systems. Daniel Almeida - Assignment 2 */
-
 /*
 Periodically, the master queries all of the slave nodes for their local time and
 each node replies with their current time.  The master then computes the time
@@ -9,7 +7,7 @@ tolerant average of the delta values: an average over the largest set of delta
 values that differ from one another by at most a pre-defined constant d. Then,
 for each slave the master computes a time correction value by computing the
 difference between avg and the delta value for the slave. Finally, the master
-sends this correction value to each slave for the slaves to adjust their clocks.
+sends this correction value to each slave for the slaves to adjust their clock.
 */
 
 package main
@@ -27,25 +25,22 @@ var Logger *govec.GoLog
 func main() {
 	// Check number of arguments
 	numArgs := len(os.Args)
-	// fmt.Println(numArgs)
-	if numArgs < 2 || numArgs > 7 {
+	if numArgs < 2 || numArgs > 6 {
 		panic("Not enough arguments.")
 	}
 
 	address := os.Args[2]
-	// fmt.Println("ip:port -> ", address)
 
 	initialClockString := os.Args[3]
 	initialClock, err := strconv.Atoi(initialClockString)
 	checkError(err)
-	// fmt.Println("Initial clock: ", initialClock)
 
 	// Parse flag (master or slave)
 	masterOrSlaveFlag := os.Args[1]
 	if masterOrSlaveFlag == "-m" {
 		// Master is running
-		if numArgs != 7 {
-			panic("Expected 6 arguments.")
+		if numArgs != 6 {
+			panic("Expected 5 arguments.")
 		}
 
 		thresholdString := os.Args[4]
@@ -53,22 +48,18 @@ func main() {
 		checkError(err)
 
 		slavesFile := os.Args[5]
-		logFile := os.Args[6]
-		Logger = govec.Initialize("master", logFile)
 		master := Master{address, initialClock, threshold, make(map[string]*Slave), 0}
 		master.loadSlavesFromFile(slavesFile)
 		master.run()
 
 	} else if masterOrSlaveFlag == "-s" {
 		// Slave is running
-		if numArgs != 5 {
-			panic("Expected 4 arguments.")
+		if numArgs != 4 {
+			panic("Expected 3 arguments.")
 		}
 
-		logFile := os.Args[4]
-		Logger = govec.Initialize("slave"+address, logFile)
 		slave := Slave{address, initialClock, -1}
-		slave.run(logFile)
+		slave.run()
 	} else {
 		panic("Flag should be -m or -s")
 	}

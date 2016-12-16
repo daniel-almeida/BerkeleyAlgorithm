@@ -145,6 +145,5 @@ func (m *Master) loadSlavesFromFile(path string) {
 	for scanner.Scan() {
 		slaveAddress := scanner.Text()
 		m.Slaves[slaveAddress] = &Slave{slaveAddress, -1, -1}
-		// fmt.Println("Created slave from file: ", m.Slaves[slaveAddress])
 	}
 }

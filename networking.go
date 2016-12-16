@@ -2,9 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
-
-	"github.com/arcaneiceman/GoVector/capture"
 )
 
 type Message struct {
@@ -26,19 +25,17 @@ func createUDPConn(address string) net.PacketConn {
 }
 
 func sendMessage(conn net.PacketConn, address string, message Message) {
-	// fmt.Printf("Sending message of type %v to Node %v\n", messageType, address)
 	rAddr, err := net.ResolveUDPAddr("udp", address)
 	if checkError(err) {
 		return
 	}
 
-	// conn, err := net.DialUDP("udp", nil, rAddr)
-	// if checkError(err) {
-	// 	return
-	// }
+	messageJSON, err := json.Marshal(&message)
+	if err != nil {
+		fmt.Println(err)
+	}
 
-	buf := Logger.PrepareSend("Sending message", message)
-	_, err = capture.WriteTo(conn.WriteTo, buf, rAddr)
+	_, err = conn.WriteTo(messageJSON, rAddr)
 	checkError(err)
 }
 
@@ -46,9 +43,11 @@ func readMessage(conn net.PacketConn) (string, Message) {
 	b := make([]byte, 1024)
 	var message Message
 
-	n, senderAddress, err := capture.ReadFrom(conn.ReadFrom, b[0:])
+	n, senderAddress, err := conn.ReadFrom(b[0:])
 	checkError(err)
-	Logger.UnpackReceive("Received message", b[0:n], &message)
+
+	err = json.Unmarshal(b[:n], &message)
+	checkError(err)
 
 	return senderAddress.String(), message
 }

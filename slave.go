@@ -1,17 +1,3 @@
-/* CPSC 538B - Distributed Systems. Daniel Almeida - Assignment 2 */
-
-/*
-Periodically, the master queries all of the slave nodes for their local time and
-each node replies with their current time.  The master then computes the time
-difference between its local clock and that of each of the slaves (deriving a
-set of delta values, one per slave). Next, the master computes avg, a fault
-tolerant average of the delta values: an average over the largest set of delta
-values that differ from one another by at most a pre-defined constant d. Then,
-for each slave the master computes a time correction value by computing the
-difference between avg and the delta value for the slave. Finally, the master
-sends this correction value to each slave for the slaves to adjust their clocks.
-*/
-
 package main
 
 import (
@@ -39,7 +25,7 @@ func (slice Slaves) Swap(i, j int) {
 	slice[i], slice[j] = slice[j], slice[i]
 }
 
-func (s *Slave) run(logFile string) {
+func (s *Slave) run() {
 	go startClock(&s.Clock)
 
 	// Set up UDPConn
