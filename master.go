@@ -2,55 +2,39 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"sort"
-	"strconv"
-	"strings"
 	"time"
-
-	"github.com/arcaneiceman/GoVector/capture"
-	"github.com/arcaneiceman/GoVector/govec"
 )
 
 type Master struct {
-	Address    string
-	Clock      int
-	Threshold  int
-	SlavesFile string
-	LogFile    string
-	Slaves     map[string]*Slave
-	// Conn *net.UDPConn
-	Conn      net.PacketConn
-	SyncRound int
-	Logger    *govec.GoLog
-	// slaves []Slave
+	listenAddress string
+	Clock         int
+	Threshold     int
+	Slaves        map[string]*Slave
+	SyncRound     int
 }
 
-func (m *Master) run() {
-	m.Logger = govec.Initialize("master", m.LogFile)
+var conn net.PacketConn
 
+func (m *Master) run() {
 	go startClock(&m.Clock)
 
-	m.loadSlavesFromFile()
-	// fmt.Println(m.Slaves)
-
 	// Set up UDPConn
-	m.establishConnection()
+	conn = createUDPConn(m.listenAddress)
+	defer conn.Close()
 
 	// Start listener to hear back from Slaves
 	go m.listenToSlaves()
 
-	// var responseChans = [5]chan int
-	// for i := range responseChans {
-	// 	responseChans[i] := make(chan int)
-	// }
-	// res := make([]int, len(slaves))
 	for {
+		requestMessage := newMessage(m.SyncRound, "CLOCK_REQUEST", m.Clock)
 		for _, v := range m.Slaves {
 			v.Clock = -1
-			go m.sendClockRequest(v)
+			go sendMessage(conn, v.Address, requestMessage)
 		}
 
 		syncRoundTimeout := time.NewTimer(time.Second * 5)
@@ -71,21 +55,18 @@ func (m *Master) run() {
 
 		// Send updated clock to each slave
 		for _, v := range m.Slaves {
-			fmt.Printf("Sending clock adjust. AVG: %v ; Delta: %v; Final value: %v\n", avg, v.Delta, v.Delta-avg)
-			go m.sendClockUpdate(v, m.SyncRound, v.Delta-avg)
+			// fmt.Printf("Sending clock adjust. AVG: %v ; Delta: %v; Final value: %v\n\n", avg, v.Delta, v.Delta-avg)
+			offset := v.Delta - avg
+			go sendMessage(conn, v.Address, newMessage(m.SyncRound, "CLOCK_UPDATE", offset))
 		}
-		m.Clock = m.Clock - avg
 
-		// for _, v := range m.Slaves {
-		// 	fmt.Printf("Slave %v - clock: %v, delta %v\n", v.Address, v.Clock, v.Delta)
-		// }
+		// Update Master's clock as well
+		m.Clock = m.Clock - avg
 	}
 }
 
 func calculateAvg(slavesAlive Slaves, d int) int {
-	fmt.Println("Valid slaves: ", slavesAlive)
 	sort.Sort(slavesAlive)
-	fmt.Println("Valid slaves sorted: ", slavesAlive)
 	sizeLargestSubset := 0
 	avg := 0
 
@@ -110,99 +91,40 @@ func calculateAvg(slavesAlive Slaves, d int) int {
 			avg = totalDelta / sizeOfSubset
 		}
 	}
-	fmt.Println("Size of subset: ", sizeLargestSubset)
-	fmt.Println("Avg delta: ", avg)
+	// fmt.Println("Size of subset: ", sizeLargestSubset)
+	// fmt.Println("Avg delta: ", avg)
 	return avg
 }
 
-func (m *Master) establishConnection() {
-	// masterAddr, err := net.ResolveUDPAddr("udp", m.Address)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	os.Exit(1)
-	// }
-
-	// m.Conn, err = net.ListenUDP("udp", masterAddr)
-	var err error
-
-	m.Conn, err = net.ListenPacket("udp", m.Address)
-	checkError(err)
-}
-
 func (m *Master) listenToSlaves() {
-	b := make([]byte, 1024)
-
 	for {
-		var messageReceived string
-		// n, slaveAddr, err := m.Conn.ReadFromUDP(b[0:])
-		n, slaveAddr, err := capture.ReadFrom(m.Conn.ReadFrom, b[0:])
-		checkError(err)
-
-		m.Logger.UnpackReceive("Received message from slave", b[0:n], &messageReceived)
+		senderAddress, message := readMessage(conn)
 		t3 := m.Clock
+		// fmt.Println(message, " received from Slave at ", senderAddress)
 
-		slaveAddress := slaveAddr.String()
-		fmt.Println(messageReceived, " from Slave at ", slaveAddress)
-
-		splitMsg := strings.Split(messageReceived, " ")
-
-		if len(splitMsg) != 4 {
-			fmt.Println("Malformed message from ", slaveAddress)
+		if message.Type != "CLOCK_RESPONSE" {
+			fmt.Println("Received invalid message.")
 			continue
 		}
 
-		syncRound, err := strconv.Atoi(splitMsg[0])
-		checkError(err)
-
-		if syncRound < m.SyncRound {
+		if message.SyncRound < m.SyncRound {
 			fmt.Println("Message out syncRound.")
 			continue
 		}
 
-		action := splitMsg[1]
-
-		if action == "clock" {
-			t1, err := strconv.Atoi(splitMsg[2])
-			checkError(err)
-
-			t2, err := strconv.Atoi(splitMsg[3])
-			checkError(err)
-
-			delta := (t1+t3)/2 - t2
-			m.Slaves[slaveAddress].Clock = t2
-			m.Slaves[slaveAddress].Delta = delta
+		var data ClockData
+		err := json.Unmarshal(message.Body, &data)
+		if err != nil {
+			fmt.Println(err)
+			continue
 		}
+
+		delta := (data.T1+t3)/2 - data.T2
+		m.Slaves[senderAddress].Clock = data.T2
+		m.Slaves[senderAddress].Delta = delta
+		fmt.Printf("--- SYNC %v (SLAVE %v) --- \n", message.SyncRound, senderAddress)
+		fmt.Printf("--> CLOCK: %v; \n--> OFFSET: %v; \n--> UPDATED CLOCK: %v\n\n", data.T2, delta, data.T2+delta)
 	}
-}
-
-func (m *Master) sendClockRequest(s *Slave) {
-
-	slaveAddr, err := net.ResolveUDPAddr("udp", s.Address)
-	checkError(err)
-
-	msg := strconv.Itoa(m.SyncRound) + " request " + strconv.Itoa(m.Clock)
-	// fmt.Println("Sending this msg: ", msg)
-
-	outBuf := m.Logger.PrepareSend("Sending message to slave: ", msg)
-
-	// Send a message to the slave requesting its clock
-	// _, err = m.Conn.WriteToUDP(outBuf, slaveAddr)
-	_, err = capture.WriteTo(m.Conn.WriteTo, outBuf, slaveAddr)
-	checkError(err)
-}
-
-func (m *Master) sendClockUpdate(s *Slave, syncRound int, clockDiff int) {
-
-	slaveAddr, err := net.ResolveUDPAddr("udp", s.Address)
-	checkError(err)
-
-	msg := strconv.Itoa(syncRound) + " update " + strconv.Itoa(s.Clock+clockDiff)
-	outBuf := m.Logger.PrepareSend("Sending message to slave: ", &msg)
-
-	// Send a message to the slave requesting its clock
-	// _, err = m.Conn.WriteToUDP([]byte(msg), slaveAddr)
-	_, err = capture.WriteTo(m.Conn.WriteTo, outBuf, slaveAddr)
-	checkError(err)
 }
 
 func startClock(clock *int) {
@@ -213,18 +135,16 @@ func startClock(clock *int) {
 	}
 }
 
-func (m *Master) loadSlavesFromFile() {
-	// slaves := make([]Slave, 0)
-
+func (m *Master) loadSlavesFromFile(path string) {
 	// Read slavesfile to get list of slaves (host:ip) to connect with
-	f, err := os.Open(m.SlavesFile)
+	f, err := os.Open(path)
 	checkError(err)
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		slave_address := scanner.Text()
-		m.Slaves[slave_address] = &Slave{slave_address, -1, -1}
-		fmt.Println("Created slave from file: ", m.Slaves[slave_address])
+		slaveAddress := scanner.Text()
+		m.Slaves[slaveAddress] = &Slave{slaveAddress, -1, -1}
+		// fmt.Println("Created slave from file: ", m.Slaves[slaveAddress])
 	}
 }

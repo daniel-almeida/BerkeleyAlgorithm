@@ -15,13 +15,8 @@ sends this correction value to each slave for the slaves to adjust their clocks.
 package main
 
 import (
+	"encoding/json"
 	"fmt"
-	"net"
-	"strconv"
-	"strings"
-
-	"github.com/arcaneiceman/GoVector/capture"
-	"github.com/arcaneiceman/GoVector/govec"
 )
 
 type Slave struct {
@@ -45,75 +40,50 @@ func (slice Slaves) Swap(i, j int) {
 }
 
 func (s *Slave) run(logFile string) {
-
-	Logger := govec.Initialize("slave"+s.Address, logFile)
 	go startClock(&s.Clock)
 
-	// Listen to host:ip
-	// slaveAddr, err := net.ResolveUDPAddr("udp", s.Address)
-	// if err != nil {
-	// 	fmt.Println(err)
-	// 	os.Exit(1)
-	// }
-
-	// slaveConn, err := net.ListenUDP("udp", slaveAddr)
-	conn, err := net.ListenPacket("udp", s.Address)
-	checkError(err)
-
+	// Set up UDPConn
+	conn := createUDPConn(s.Address)
 	defer conn.Close()
 
-	// Create byte array with underlying array to hold up to 1024 bytes
-	b := make([]byte, 1024)
-
 	lastKnownSyncRound := -1
-
 	for {
-		var msgReceived string
-		// Receive message from Master
-		// n, masterAddress, err := conn.ReadFromUDP(b[:])
-		n, masterAddress, err := capture.ReadFrom(conn.ReadFrom, b[0:])
-		checkError(err)
+		senderAddress, message := readMessage(conn)
+		// fmt.Println(message, " received from Master at ", senderAddress)
 
-		Logger.UnpackReceive("Received message from master: ", b[0:n], &msgReceived)
-		// fmt.Println("Received ", string(b[:n]), "from master at ", masterAddress)
-
-		// msgReceived := string(b[:n])
-		splitMsg := strings.Split(msgReceived, " ")
-
-		if len(splitMsg) < 2 || len(splitMsg) > 4 {
-			fmt.Println("Malformed message from ", masterAddress)
-			continue
-		}
-
-		syncRound := splitMsg[0]
-		syncRoundInt, err := strconv.Atoi(syncRound)
-		checkError(err)
-
-		action := splitMsg[1]
-
-		if action == "request" {
-			lastKnownSyncRound = syncRoundInt
-			t1 := splitMsg[2]
-			t2 := s.Clock
+		switch message.Type {
+		case "CLOCK_REQUEST":
+			// Master is requesting local clock
+			fmt.Println("Received CLOCK_REQUEST from Master")
+			lastKnownSyncRound = message.SyncRound
+			var t1 int // master's clock
+			err := json.Unmarshal(message.Body, &t1)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			t2 := s.Clock // local clock
 
 			// Send local clock back to Master
-			responseMsg := syncRound + " clock " + t1 + " " + strconv.Itoa(t2)
-			msgBuf := Logger.PrepareSend("Sending message to master: ", responseMsg)
+			clockResponseMessage := newMessage(message.SyncRound, "CLOCK_RESPONSE", ClockData{T1: t1, T2: t2})
+			sendMessage(conn, senderAddress, clockResponseMessage)
+		case "CLOCK_UPDATE":
+			if message.SyncRound < lastKnownSyncRound {
+				// Late message from an earlier synchronization round
+				continue
+			}
 
-			// n, err = conn.WriteToUDP([]byte(msgBuf), masterAddress)
-			_, err = capture.WriteTo(conn.WriteTo, msgBuf, masterAddress)
-			checkError(err)
-
-		} else if action == "update" && syncRoundInt >= lastKnownSyncRound {
+			fmt.Println("Received CLOCK_UPDATE from Master")
 			// Update local clock (sync)
-			clockAdjust, err := strconv.Atoi(splitMsg[2])
-			checkError(err)
-
-			fmt.Printf("Clock %v adjusted (%v) to ", s.Clock, clockAdjust)
-			s.Clock = s.Clock + clockAdjust
-			fmt.Printf("%v\n", s.Clock)
+			var clockOffset int
+			err := json.Unmarshal(message.Body, &clockOffset)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+			s.Clock = s.Clock + clockOffset
+			fmt.Printf("Clock %v adjusted (offset: %v) to %v\n", s.Clock, clockOffset, s.Clock+clockOffset)
 		}
-
 	}
 
 	fmt.Println("Hello world.")

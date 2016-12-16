@@ -18,7 +18,11 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+
+	"github.com/arcaneiceman/GoVector/govec"
 )
+
+var Logger *govec.GoLog
 
 func main() {
 	// Check number of arguments
@@ -28,8 +32,8 @@ func main() {
 		panic("Not enough arguments.")
 	}
 
-	ipPort := os.Args[2]
-	// fmt.Println("ip:port -> ", ipPort)
+	address := os.Args[2]
+	// fmt.Println("ip:port -> ", address)
 
 	initialClockString := os.Args[3]
 	initialClock, err := strconv.Atoi(initialClockString)
@@ -50,8 +54,9 @@ func main() {
 
 		slavesFile := os.Args[5]
 		logFile := os.Args[6]
-
-		master := Master{ipPort, initialClock, threshold, slavesFile, logFile, make(map[string]*Slave), nil, 0, nil}
+		Logger = govec.Initialize("master", logFile)
+		master := Master{address, initialClock, threshold, make(map[string]*Slave), 0}
+		master.loadSlavesFromFile(slavesFile)
 		master.run()
 
 	} else if masterOrSlaveFlag == "-s" {
@@ -61,16 +66,19 @@ func main() {
 		}
 
 		logFile := os.Args[4]
-		slave := Slave{ipPort, initialClock, -1}
+		Logger = govec.Initialize("slave"+address, logFile)
+		slave := Slave{address, initialClock, -1}
 		slave.run(logFile)
 	} else {
 		panic("Flag should be -m or -s")
 	}
 }
 
-func checkError(err error) {
+func checkError(err error) bool {
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
+		return true
 	}
+	return false
 }
